@@ -180,6 +180,10 @@ func NewServer(host string, port int, autoAck bool) (server Server, err error) {
 func NewClient(host string, port int) (client Client, err error) {
 	client.connection, err = net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
 
+	if err != nil {
+		return
+	}
+
 	offer := Message{
 		Txn:     1,
 		Command: "open",
