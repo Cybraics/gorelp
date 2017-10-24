@@ -27,7 +27,7 @@ type Message struct {
 	Acked bool
 
 	// Used internally for acking.
-	sourceConnection net.Conn
+	sourceConnection io.ReadWriteCloser
 }
 
 /*
@@ -46,7 +46,8 @@ type Server struct {
 
 // Client - A client to a RELP server
 type Client struct {
-	connection net.Conn
+	// connection net.Conn
+	connection io.ReadWriteCloser
 
 	nextTxn int
 }
@@ -177,12 +178,19 @@ func NewServer(host string, port int, autoAck bool) (server Server, err error) {
 }
 
 // NewClient - Starts a new RELP client
-func NewClient(host string, port int) (client Client, err error) {
-	client.connection, err = net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+func NewClient(host string, port int) (Client, error) {
+	connection, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
 
 	if err != nil {
-		return
+		return Client{}, err
 	}
+
+	return NewClientFrom(connection)
+}
+
+// NewClientFrom creates a RelpClient from a ReadWriteCloser (i.e. TCP or TLS connection)
+func NewClientFrom(rwc io.ReadWriteCloser) (client Client, err error) {
+	client.connection = rwc
 
 	offer := Message{
 		Txn:     1,
@@ -225,7 +233,7 @@ func (m Message) send(out io.Writer) (nn int, err error) {
 // Ack - Acknowledges a message
 func (m *Message) Ack() (err error) {
 	if m.Acked {
-		return fmt.Errorf("Called Ack on already-acknowledged message %d.", m.Txn)
+		return fmt.Errorf("called Ack on already-acknowledged message %d", m.Txn)
 	}
 
 	if m.sourceConnection == nil {
