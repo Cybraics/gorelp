@@ -8,6 +8,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
+	"github.com/pkg/errors"
 )
 
 const relpVersion = 0
@@ -49,6 +51,8 @@ type Server struct {
 type Client struct {
 	// connection net.Conn
 	connection io.ReadWriteCloser
+	reader *bufio.Reader
+	writer *bufio.Writer
 
 	windowSize int
 	window Window
@@ -199,14 +203,18 @@ func NewClient(host string, port int, windowSize int) (Client, error) {
 func NewClientFrom(rwc io.ReadWriteCloser, windowSize int) (client Client, err error) {
 	client.connection = rwc
 
+	client.reader = bufio.NewReaderSize(rwc, 512*1024)
+	client.writer = bufio.NewWriterSize(rwc, 2*1024*1024)
+
 	offer := Message{
 		Txn:     1,
 		Command: "open",
 		Data:    fmt.Sprintf("relp_version=%d\nrelp_software=%s\ncommands=syslog", relpVersion, relpSoftware),
 	}
-	offer.send(client.connection)
+	offer.send(client.writer)
+	client.writer.Flush()
 
-	offerResponse, err := readMessage(client.connection)
+	offerResponse, err := readMessage(client.reader)
 	if err != nil {
 		return client, err
 	}
@@ -280,6 +288,10 @@ func (c *Client) SendString(msg string) (err error) {
 	return err
 }
 
+func (c *Client) Flush() error {
+	return c.writer.Flush()
+}
+
 // SendMessage - Sends a message using the client's connection
 func (c *Client) SendMessage(msg Message) (err error) {
 	// return last error from reader thread
@@ -289,7 +301,12 @@ func (c *Client) SendMessage(msg Message) (err error) {
 
 	c.nextTxn = c.nextTxn + 1
 	c.window.Add(Txn(msg.Txn))
-	_, c.Error = msg.send(c.connection)
+	_, c.Error = msg.send(c.writer)
+
+	// TODO - magic number of messages remaining before we flush
+	if c.window.Remaining() < 10 {
+		c.writer.Flush()
+	}
 
 	// TODO: check error
 	// TODO: Make waiting for an ack optional
@@ -304,20 +321,41 @@ func (c *Client) SendMessage(msg Message) (err error) {
 	return c.Error
 }
 
+// Outstanding returns the number of messages outstanding
+func (c *Client) Outstanding() int {
+	return c.window.Outstanding()
+}
+
+// Drain waits for all outstanding messages to be acked
+func (c *Client) Drain(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		c.Flush()
+		if c.window.Outstanding() == 0 {
+			return nil
+		}
+		if timeout != 0 && time.Now().After(deadline) {
+			return errors.New("timed out")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Reader handles windowed responses
 func (c *Client) Reader() {
 	for {
 		if c.Closed {
 			return
 		}
-		ack, err := readMessage(c.connection)
+		ack, err := readMessage(c.reader)
 		doClose := false
 		if err != nil {
 			log.Fatal("Failed to read response", err)
 			doClose = true
 		}
 		if ack.Command != "rsp" {
-			log.Fatalf("Received non-rsp response from server (%v, %v, %v)\n", ack.Command, ack.Txn, ack.Data)
+			log.Fatalf("Received non-rsp response from server (%v, %v, %v)\n", ack.Txn, ack.Command, ack.Data)
 			doClose = true
 		}
 		c.window.Remove(Txn(ack.Txn))
