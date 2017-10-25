@@ -44,10 +44,17 @@ type Server struct {
 	done     bool
 }
 
+
 // Client - A client to a RELP server
 type Client struct {
 	// connection net.Conn
 	connection io.ReadWriteCloser
+
+	windowSize int
+	window Window
+
+	Error error
+	Closed bool
 
 	nextTxn int
 }
@@ -178,18 +185,18 @@ func NewServer(host string, port int, autoAck bool) (server Server, err error) {
 }
 
 // NewClient - Starts a new RELP client
-func NewClient(host string, port int) (Client, error) {
+func NewClient(host string, port int, windowSize int) (Client, error) {
 	connection, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
 
 	if err != nil {
 		return Client{}, err
 	}
 
-	return NewClientFrom(connection)
+	return NewClientFrom(connection, windowSize)
 }
 
 // NewClientFrom creates a RelpClient from a ReadWriteCloser (i.e. TCP or TLS connection)
-func NewClientFrom(rwc io.ReadWriteCloser) (client Client, err error) {
+func NewClientFrom(rwc io.ReadWriteCloser, windowSize int) (client Client, err error) {
 	client.connection = rwc
 
 	offer := Message{
@@ -213,6 +220,12 @@ func NewClientFrom(rwc io.ReadWriteCloser) (client Client, err error) {
 
 	client.nextTxn = 2
 	// TODO: Parse the server's info/commands into the Client object
+
+	client.windowSize = windowSize
+	client.window = NewArrayWindow(windowSize)
+
+	go client.Reader()
+
 	return client, err
 }
 
@@ -269,19 +282,55 @@ func (c *Client) SendString(msg string) (err error) {
 
 // SendMessage - Sends a message using the client's connection
 func (c *Client) SendMessage(msg Message) (err error) {
+	// return last error from reader thread
+	if c.Error != nil {
+		return c.Error
+	}
+
 	c.nextTxn = c.nextTxn + 1
-	_, err = msg.send(c.connection)
+	c.window.Add(Txn(msg.Txn))
+	_, c.Error = msg.send(c.connection)
 
+	// TODO: check error
 	// TODO: Make waiting for an ack optional
-	ack, err := readMessage(c.connection)
-	if ack.Command != "rsp" {
-		return fmt.Errorf("Response to txn %d was %s: %s", msg.Txn, ack.Command, ack.Data)
-	}
-	if ack.Txn != msg.Txn {
-		return fmt.Errorf("Response txn to %d was %d", msg.Txn, ack.Txn)
+	//ack, err := readMessage(c.connection)
+	//if ack.Command != "rsp" {
+	//	return fmt.Errorf("Response to txn %d was %s: %s", msg.Txn, ack.Command, ack.Data)
+	//}
+	//if ack.Txn != msg.Txn {
+	//	return fmt.Errorf("Response txn to %d was %d", msg.Txn, ack.Txn)
+	//}
+
+	return c.Error
+}
+
+// Reader handles windowed responses
+func (c *Client) Reader() {
+	for {
+		if c.Closed {
+			return
+		}
+		ack, err := readMessage(c.connection)
+		doClose := false
+		if err != nil {
+			log.Fatal("Failed to read response", err)
+			doClose = true
+		}
+		if ack.Command != "rsp" {
+			log.Fatalf("Received non-rsp response from server (%v, %v, %v)\n", ack.Command, ack.Txn, ack.Data)
+			doClose = true
+		}
+		c.window.Remove(Txn(ack.Txn))
+		if c.Error == nil {
+			c.Error = err
+		}
+		if doClose {
+			c.connection.Close()
+			c.Closed = true
+			return
+		}
 	}
 
-	return err
 }
 
 // Close - Closes the connection gracefully
