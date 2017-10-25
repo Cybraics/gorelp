@@ -354,11 +354,16 @@ func (c *Client) Reader() {
 			log.Fatal("Failed to read response", err)
 			doClose = true
 		}
-		if ack.Command != "rsp" {
+		switch ack.Command {
+		case "rsp":
+			c.window.Remove(Txn(ack.Txn))
+		case "serverclose":
+			log.Print("Received serverclose hint")
+			doClose = true
+		default:
 			log.Fatalf("Received non-rsp response from server (%v, %v, %v)\n", ack.Txn, ack.Command, ack.Data)
 			doClose = true
 		}
-		c.window.Remove(Txn(ack.Txn))
 		if c.Error == nil {
 			c.Error = err
 		}
